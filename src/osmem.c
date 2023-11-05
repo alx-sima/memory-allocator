@@ -32,9 +32,7 @@ struct block_meta *split_block(struct block_meta *block, size_t size)
 	new_block->next = block->next;
 	new_block->prev = block;
 
-	if (new_block->next) {
-		block->next->prev = new_block;
-	}
+	block->next->prev = new_block;
 	block->next = new_block;
 
 	block->size = (void *)new_block - space_to_split;
@@ -50,14 +48,14 @@ void *malloc_small(size_t size)
 		DIE(prev_brk == (void *)-1, "fail brk() preallocation");
 
 		small_pool = prev_brk;
-		small_pool->next = NULL;
-		small_pool->prev = NULL;
+		small_pool->next = small_pool;
+		small_pool->prev = small_pool;
 		small_pool->status = STATUS_MAPPED;
 		small_pool->size = MMAP_TRESHOLD - sizeof(struct block_meta);
 	}
 
 	struct block_meta *iter = small_pool;
-	while (iter->next) {
+	do {
 		/* Skip allocated blocks or blocks to small for this size. */
 		if (iter->size < size || iter->status == STATUS_ALLOC) {
 			iter = iter->next;
@@ -79,8 +77,9 @@ void *malloc_small(size_t size)
 
 		struct block_meta *new_block = split_block(iter, size);
 		return get_payload(new_block);
-	}
+	} while (iter != small_pool);
 
+	iter = iter->prev;
 	if (iter->status == STATUS_ALLOC) {
 		/* If the last block is occupied, extend
 		 * the brk to accomodate for the new block. */
@@ -93,11 +92,13 @@ void *malloc_small(size_t size)
 		size_t needed_space = (void *)new_block + size - brk_end;
 		DIE(sbrk(needed_space) == (void *)-1, "fail brk() extension");
 
-		iter->next = new_block;
-		new_block->next = NULL;
-		new_block->prev = iter;
 		new_block->size = size;
 		new_block->status = STATUS_ALLOC;
+
+		new_block->prev = iter;
+		new_block->next = iter->next;
+		new_block->prev->next = new_block;
+		new_block->next->prev = new_block;
 
 		return new_payload;
 	}
@@ -113,31 +114,25 @@ void *malloc_small(size_t size)
 
 void *malloc_large(size_t size)
 {
-
 	size_t actual_size = size + align(sizeof(struct block_meta));
 	void *ptr = mmap(NULL, actual_size, PROT_READ | PROT_WRITE,
 					 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	DIE(ptr == MAP_FAILED, "fail mmap()");
 
-	struct block_meta *bm = align(ptr);
-	bm->status = STATUS_ALLOC;
-	bm->size = actual_size;
-	bm->next = NULL;
+	struct block_meta *block = align(ptr);
+	block->status = STATUS_ALLOC;
+	block->size = actual_size;
 
-	struct block_meta *last_block = large_pool;
-	if (!last_block) {
-		bm->prev = NULL;
-		large_pool = bm;
-		return get_payload(bm);
+	if (large_pool) {
+		block->next = large_pool;
+		block->prev = large_pool->prev;
+	} else {
+		large_pool = block;
+		block->next = block;
+		block->prev = block;
 	}
 
-	while (last_block->next) {
-		last_block = last_block->next;
-	}
-
-	last_block->next = bm;
-	bm->prev = last_block;
-	return get_payload(bm);
+	return get_payload(block);
 }
 
 void *os_malloc(size_t size)
@@ -160,18 +155,26 @@ void os_free(void *ptr)
 	}
 
 	struct block_meta *block = large_pool;
-	while (block) {
+	do {
 		if (get_payload(block) == ptr) {
-			if (block->prev)
-				block->prev->next = block->next;
-			if (block->next)
-				block->next->prev = block->prev;
+			if (block == large_pool) {
+				if (block->next == block) {
+					/* This is the last block in the list. */
+					large_pool = NULL;
+				} else {
+					large_pool = block->next;
+				}
+			}
+
+			block->prev->next = block->next;
+			block->next->prev = block->prev;
 			munmap(block, block->size);
 			return;
 		}
+
 		block = block->next;
-	}
-	
+	} while (block != large_pool);
+
 	/* TODO: free small blocks */
 }
 
