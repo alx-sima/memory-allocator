@@ -76,7 +76,7 @@ void *malloc_small(size_t size)
 		/* Split the block to create a new one with the free space. */
 
 		struct block_meta *new_block = split_block(iter, size);
-		return get_payload(new_block);
+		return payload;
 	} while (iter != small_pool);
 
 	iter = iter->prev;
@@ -148,9 +148,26 @@ void *os_malloc(size_t size)
 	return malloc_large(size);
 }
 
-void os_free(void *ptr)
+void free_small(void *ptr)
 {
-	if (!ptr) {
+	if (!small_pool) {
+		return;
+	}
+
+	struct block_meta *block = small_pool;
+	do {
+		if (get_payload(block) == ptr) {
+			block->status = STATUS_FREE;
+			return;
+		}
+
+		block = block->next;
+	} while (block != small_pool);
+}
+
+void free_large(void *ptr)
+{
+	if (!large_pool) {
 		return;
 	}
 
@@ -174,8 +191,16 @@ void os_free(void *ptr)
 
 		block = block->next;
 	} while (block != large_pool);
+}
 
-	/* TODO: free small blocks */
+void os_free(void *ptr)
+{
+	if (!ptr) {
+		return;
+	}
+
+	free_small(ptr);
+	free_large(ptr);
 }
 
 void *os_calloc(size_t nmemb, size_t size)
