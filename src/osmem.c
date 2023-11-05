@@ -7,25 +7,36 @@
 #include "block_meta.h"
 #include "osmem.h"
 
+#define ALIGNMENT 8
 #define MMAP_TRESHOLD (128 << 10) /* 128 kb */
+
+#define ALIGN(x) ((typeof(x))(((long)(x) + (ALIGNMENT - 1)) & -ALIGNMENT))
 
 static struct block_meta *small_pool;
 static struct block_meta *large_pool;
 
-static inline void *align(void *addr)
-{
-	return (void *)((long)(addr + (8 - 1)) & -8);
-}
-
 static inline void *get_payload(struct block_meta *bm)
 {
-	return align(bm + 1);
+	return ALIGN(bm + 1);
+}
+
+void merge_blocks(struct block_meta *left, struct block_meta *right)
+{
+	/* Skip node `right`. */
+	right->next->prev = left;
+	left->next = right->next;
+	if (right == small_pool) {
+		small_pool = right->next;
+	}
+
+	void *payload_end = get_payload(right) + right->size;
+	left->size = payload_end - get_payload(left);
 }
 
 struct block_meta *split_block(struct block_meta *block, size_t size)
 {
 	void *space_to_split = get_payload(block);
-	struct block_meta *new_block = align(space_to_split + size);
+	struct block_meta *new_block = ALIGN(space_to_split + size);
 	new_block->status = STATUS_MAPPED;
 	new_block->size = size;
 
@@ -40,7 +51,7 @@ struct block_meta *split_block(struct block_meta *block, size_t size)
 	return new_block;
 }
 
-struct block_meta *malloc_small(size_t size)
+struct block_meta *new_small_block(size_t size)
 {
 	if (!small_pool) {
 		/* Preallocate heap for fewer future brk calls. */
@@ -66,7 +77,7 @@ struct block_meta *malloc_small(size_t size)
 
 		void *payload = get_payload(iter);
 		void *payload_end = payload + iter->size;
-		void *idk = align(payload + size);
+		void *idk = ALIGN(payload + size);
 
 		size_t remaining = payload_end - idk;
 
@@ -87,13 +98,13 @@ struct block_meta *malloc_small(size_t size)
 
 		void *brk_end = get_payload(iter) + iter->size;
 
-		struct block_meta *new_block = align(brk_end);
+		struct block_meta *new_block = ALIGN(brk_end);
 		void *new_payload = get_payload(new_block);
 
-		size_t needed_space = (int)align(size) + new_payload - brk_end;
+		size_t needed_space = (int)ALIGN(size) + new_payload - brk_end;
 		DIE(sbrk(needed_space) == (void *)-1, "fail brk() extension");
 
-		new_block->size = align(size);
+		new_block->size = ALIGN(size);
 		new_block->status = STATUS_ALLOC;
 
 		new_block->prev = iter;
@@ -106,21 +117,20 @@ struct block_meta *malloc_small(size_t size)
 
 	/* If the last block is free, extend the
 	 * brk to include the size needed. */
-	void *payload = get_payload(iter);
 	size_t needed_space = size - iter->size;
 	DIE(sbrk(needed_space) == (void *)-1, "fail brk() extension");
 	iter->size = size;
 	return iter;
 }
 
-struct block_meta *malloc_large(size_t size)
+struct block_meta *new_large_block(size_t size)
 {
-	size_t actual_size = align(size + align(sizeof(struct block_meta)));
+	size_t actual_size = ALIGN(size + ALIGN(sizeof(struct block_meta)));
 	void *ptr = mmap(NULL, actual_size, PROT_READ | PROT_WRITE,
 					 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	DIE(ptr == MAP_FAILED, "fail mmap()");
 
-	struct block_meta *block = align(ptr);
+	struct block_meta *block = ALIGN(ptr);
 	block->status = STATUS_ALLOC;
 	block->size = actual_size;
 
@@ -162,23 +172,10 @@ void *os_malloc(size_t size)
 	}
 
 	if (size < MMAP_TRESHOLD) {
-		return get_payload(malloc_small(size));
+		return get_payload(new_small_block(size));
 	}
 
-	return get_payload(malloc_large(size));
-}
-
-void merge_blocks(struct block_meta *left, struct block_meta *right)
-{
-	/* Skip node `right`. */
-	right->next->prev = left;
-	left->next = right->next;
-	if (right == small_pool) {
-		small_pool = right->next;
-	}
-
-	void *payload_end = get_payload(right) + right->size;
-	left->size = payload_end - get_payload(left);
+	return get_payload(new_large_block(size));
 }
 
 void free_small(void *ptr)
@@ -256,11 +253,16 @@ void *os_realloc(void *ptr, size_t size)
 		return NULL;
 	}
 
-	/* TODO: Implement os_realloc */
-	struct block_meta *block = large_pool;
+	struct block_meta *block = small_pool;
+	do {
+		/* TODO: Implement os_realloc */
+		block = block->next;
+	} while (block != small_pool);
+
+	block = large_pool;
 	do {
 		if (get_payload(block) == ptr) {
-			struct block_meta *new_block = malloc_large(size);
+			struct block_meta *new_block = new_large_block(size);
 			void *new_payload = get_payload(new_block);
 
 			memcpy(new_payload, ptr, block->size);
