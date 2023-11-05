@@ -66,8 +66,10 @@ struct block_meta *malloc_small(size_t size)
 
 		void *payload = get_payload(iter);
 		void *payload_end = payload + iter->size;
+		void *idk = align(payload + size);
 
-		size_t remaining = payload_end - payload;
+		size_t remaining = payload_end - idk;
+
 		if (remaining <= sizeof(struct block_meta)) {
 			/* No place for new block. */
 			return iter;
@@ -86,11 +88,12 @@ struct block_meta *malloc_small(size_t size)
 		void *brk_end = get_payload(iter) + iter->size;
 
 		struct block_meta *new_block = align(brk_end);
+		void *new_payload = get_payload(new_block);
 
-		size_t needed_space = (void *)new_block + size - brk_end;
+		size_t needed_space = (int)align(size) + new_payload - brk_end;
 		DIE(sbrk(needed_space) == (void *)-1, "fail brk() extension");
 
-		new_block->size = size;
+		new_block->size = align(size);
 		new_block->status = STATUS_ALLOC;
 
 		new_block->prev = iter;
@@ -112,7 +115,7 @@ struct block_meta *malloc_small(size_t size)
 
 struct block_meta *malloc_large(size_t size)
 {
-	size_t actual_size = size + align(sizeof(struct block_meta));
+	size_t actual_size = align(size + align(sizeof(struct block_meta)));
 	void *ptr = mmap(NULL, actual_size, PROT_READ | PROT_WRITE,
 					 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	DIE(ptr == MAP_FAILED, "fail mmap()");
@@ -124,6 +127,9 @@ struct block_meta *malloc_large(size_t size)
 	if (large_pool) {
 		block->next = large_pool;
 		block->prev = large_pool->prev;
+
+		large_pool->prev->next = block;
+		large_pool->prev = block;
 	} else {
 		large_pool = block;
 		block->next = block;
@@ -162,6 +168,19 @@ void *os_malloc(size_t size)
 	return get_payload(malloc_large(size));
 }
 
+void merge_blocks(struct block_meta *left, struct block_meta *right)
+{
+	/* Skip node `right`. */
+	right->next->prev = left;
+	left->next = right->next;
+	if (right == small_pool) {
+		small_pool = right->next;
+	}
+
+	void *payload_end = get_payload(right) + right->size;
+	left->size = payload_end - get_payload(left);
+}
+
 void free_small(void *ptr)
 {
 	if (!small_pool) {
@@ -172,6 +191,15 @@ void free_small(void *ptr)
 	do {
 		if (get_payload(block) == ptr) {
 			block->status = STATUS_FREE;
+			while (block->next->status == STATUS_FREE && block->next != block) {
+				merge_blocks(block, block->next);
+			}
+
+			while (block->prev->status == STATUS_FREE && block->prev != block) {
+				merge_blocks(block->prev, block);
+				block = block->prev;
+			}
+
 			return;
 		}
 
