@@ -155,8 +155,24 @@ void *os_malloc(size_t size)
 
 void os_free(void *ptr)
 {
-	/* TODO: Implement os_free */
-	(void)ptr;
+	if (!ptr) {
+		return;
+	}
+
+	struct block_meta *block = large_pool;
+	while (block) {
+		if (get_payload(block) == ptr) {
+			if (block->prev)
+				block->prev->next = block->next;
+			if (block->next)
+				block->next->prev = block->prev;
+			munmap(block, block->size);
+			return;
+		}
+		block = block->next;
+	}
+	
+	/* TODO: free small blocks */
 }
 
 void *os_calloc(size_t nmemb, size_t size)
