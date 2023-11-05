@@ -40,7 +40,7 @@ struct block_meta *split_block(struct block_meta *block, size_t size)
 	return new_block;
 }
 
-void *malloc_small(size_t size)
+struct block_meta *malloc_small(size_t size)
 {
 	if (!small_pool) {
 		/* Preallocate heap for fewer future brk calls. */
@@ -70,13 +70,12 @@ void *malloc_small(size_t size)
 		size_t remaining = payload_end - payload;
 		if (remaining <= sizeof(struct block_meta)) {
 			/* No place for new block. */
-			return payload;
+			return iter;
 		}
 
 		/* Split the block to create a new one with the free space. */
-
-		struct block_meta *new_block = split_block(iter, size);
-		return payload;
+		(void)split_block(iter, size);
+		return iter;
 	} while (iter != small_pool);
 
 	iter = iter->prev;
@@ -87,7 +86,6 @@ void *malloc_small(size_t size)
 		void *brk_end = get_payload(iter) + iter->size;
 
 		struct block_meta *new_block = align(brk_end);
-		void *new_payload = get_payload(new_block);
 
 		size_t needed_space = (void *)new_block + size - brk_end;
 		DIE(sbrk(needed_space) == (void *)-1, "fail brk() extension");
@@ -100,7 +98,7 @@ void *malloc_small(size_t size)
 		new_block->prev->next = new_block;
 		new_block->next->prev = new_block;
 
-		return new_payload;
+		return new_block;
 	}
 
 	/* If the last block is free, extend the
@@ -109,10 +107,10 @@ void *malloc_small(size_t size)
 	size_t needed_space = size - iter->size;
 	DIE(sbrk(needed_space) == (void *)-1, "fail brk() extension");
 	iter->size = size;
-	return payload;
+	return iter;
 }
 
-void *malloc_large(size_t size)
+struct block_meta *malloc_large(size_t size)
 {
 	size_t actual_size = size + align(sizeof(struct block_meta));
 	void *ptr = mmap(NULL, actual_size, PROT_READ | PROT_WRITE,
@@ -132,7 +130,23 @@ void *malloc_large(size_t size)
 		block->prev = block;
 	}
 
-	return get_payload(block);
+	return block;
+}
+
+void delete_large_block(struct block_meta *block)
+{
+	if (block == large_pool) {
+		if (block->next == block) {
+			/* This is the last block in the list. */
+			large_pool = NULL;
+		} else {
+			large_pool = block->next;
+		}
+	}
+
+	block->prev->next = block->next;
+	block->next->prev = block->prev;
+	DIE(munmap(block, block->size) != 0, "fail munmap()");
 }
 
 void *os_malloc(size_t size)
@@ -142,10 +156,10 @@ void *os_malloc(size_t size)
 	}
 
 	if (size < MMAP_TRESHOLD) {
-		return malloc_small(size);
+		return get_payload(malloc_small(size));
 	}
 
-	return malloc_large(size);
+	return get_payload(malloc_large(size));
 }
 
 void free_small(void *ptr)
@@ -174,18 +188,7 @@ void free_large(void *ptr)
 	struct block_meta *block = large_pool;
 	do {
 		if (get_payload(block) == ptr) {
-			if (block == large_pool) {
-				if (block->next == block) {
-					/* This is the last block in the list. */
-					large_pool = NULL;
-				} else {
-					large_pool = block->next;
-				}
-			}
-
-			block->prev->next = block->next;
-			block->next->prev = block->prev;
-			munmap(block, block->size);
+			delete_large_block(block);
 			return;
 		}
 
@@ -226,5 +229,18 @@ void *os_realloc(void *ptr, size_t size)
 	}
 
 	/* TODO: Implement os_realloc */
+	struct block_meta *block = large_pool;
+	do {
+		if (get_payload(block) == ptr) {
+			struct block_meta *new_block = malloc_large(size);
+			void *new_payload = get_payload(new_block);
+
+			memcpy(new_payload, ptr, block->size);
+			delete_large_block(block);
+			return new_payload;
+		}
+
+		block = block->next;
+	} while (block != large_pool);
 	return NULL;
 }
