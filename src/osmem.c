@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <string.h>
 #include <unistd.h>
 
 #include "block_meta.h"
@@ -73,6 +74,10 @@ void *malloc_small(size_t size)
 
 void *os_malloc(size_t size)
 {
+	if (!size) {
+		return NULL;
+	}
+
 	if (size < MMAP_TRESHOLD) {
 		return malloc_small(size);
 	}
@@ -89,16 +94,26 @@ void os_free(void *ptr)
 
 void *os_calloc(size_t nmemb, size_t size)
 {
-	/* TODO: Implement os_calloc */
-	(void)nmemb;
-	(void)size;
-	return NULL;
+	size_t bytes_count = nmemb * size;
+	void *ptr = os_malloc(bytes_count);
+	if (ptr) {
+		memset(ptr, 0, bytes_count);
+	}
+
+	return ptr;
 }
 
 void *os_realloc(void *ptr, size_t size)
 {
+	if (!ptr) {
+		return malloc(size);
+	}
+
+	if (!size) {
+		free(ptr);
+		return NULL;
+	}
+
 	/* TODO: Implement os_realloc */
-	(void)ptr;
-	(void)size;
 	return NULL;
 }
