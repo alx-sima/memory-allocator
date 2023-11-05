@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include "block_meta.h"
@@ -9,6 +10,7 @@
 #define MMAP_TRESHOLD (128 << 10) /* 128 kb */
 
 static struct block_meta *small_pool;
+static struct block_meta *large_pool;
 
 static inline void *align(void *addr)
 {
@@ -109,19 +111,46 @@ void *malloc_small(size_t size)
 	return payload;
 }
 
+void *malloc_large(size_t size)
+{
+
+	size_t actual_size = size + align(sizeof(struct block_meta));
+	void *ptr = mmap(NULL, actual_size, PROT_READ | PROT_WRITE,
+					 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	DIE(ptr == MAP_FAILED, "fail mmap()");
+
+	struct block_meta *bm = align(ptr);
+	bm->status = STATUS_ALLOC;
+	bm->size = actual_size;
+	bm->next = NULL;
+
+	struct block_meta *last_block = large_pool;
+	if (!last_block) {
+		bm->prev = NULL;
+		large_pool = bm;
+		return get_payload(bm);
+	}
+
+	while (last_block->next) {
+		last_block = last_block->next;
+	}
+
+	last_block->next = bm;
+	bm->prev = last_block;
+	return get_payload(bm);
+}
+
 void *os_malloc(size_t size)
 {
 	if (!size) {
 		return NULL;
 	}
-	printf("%d\n", MMAP_TRESHOLD);
 
 	if (size < MMAP_TRESHOLD) {
 		return malloc_small(size);
 	}
 
-	/* TODO: Implement allocation of large chunks */
-	return NULL;
+	return malloc_large(size);
 }
 
 void os_free(void *ptr)
