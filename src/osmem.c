@@ -33,10 +33,16 @@ void merge_blocks(struct block_meta *left, struct block_meta *right)
 	left->size = payload_end - get_payload(left);
 }
 
-struct block_meta *split_block(struct block_meta *block, size_t size)
+void split_block(struct block_meta *block, size_t size)
 {
 	void *space_to_split = get_payload(block);
 	struct block_meta *new_block = ALIGN(space_to_split + size);
+	void *new_payload = get_payload(new_block);
+	if (space_to_split + block->size - new_payload <= 0) {
+		/* No place for new block. */
+		return;
+	}
+
 	new_block->status = STATUS_MAPPED;
 	new_block->size = size;
 
@@ -47,8 +53,6 @@ struct block_meta *split_block(struct block_meta *block, size_t size)
 	block->next = new_block;
 
 	block->size = (void *)new_block - space_to_split;
-
-	return new_block;
 }
 
 struct block_meta *new_small_block(size_t size)
@@ -66,37 +70,55 @@ struct block_meta *new_small_block(size_t size)
 	}
 
 	struct block_meta *iter = small_pool;
+	struct block_meta *best_block = NULL;
 	do {
-		/* Skip allocated blocks or blocks to small for this size. */
-		if (iter->size < size || iter->status == STATUS_ALLOC) {
+		/* Skip allocated blocks. */
+		if (iter->status == STATUS_ALLOC) {
 			iter = iter->next;
 			continue;
 		}
 
-		iter->status = STATUS_ALLOC;
+		/* Try to merge current block with the blocks to the right (the
+		 * left ones are already traversed so they can't be merged). */
+		while (iter->next != small_pool) {
+			if (iter->next->status == STATUS_ALLOC) {
+				break;
+			}
 
-		void *payload = get_payload(iter);
-		void *payload_end = payload + iter->size;
-		void *idk = ALIGN(payload + size);
-
-		size_t remaining = payload_end - idk;
-
-		if (remaining <= sizeof(struct block_meta)) {
-			/* No place for new block. */
-			return iter;
+			merge_blocks(iter, iter->next);
 		}
 
-		/* Split the block to create a new one with the free space. */
-		(void)split_block(iter, size);
-		return iter;
+		/* Skip the block as it still is to small. */
+		if (iter->size < size) {
+			iter = iter->next;
+			continue;
+		}
+
+		/* Find the best fit a.k.a. the smallest free
+		 * block that can accomodate the size. */
+		if (best_block) {
+			if (iter->size < best_block->size) {
+				best_block = iter;
+			}
+		} else {
+			best_block = iter;
+		}
+
+		iter = iter->next;
 	} while (iter != small_pool);
 
-	iter = iter->prev;
-	if (iter->status == STATUS_ALLOC) {
+	if (best_block) {
+		best_block->status = STATUS_ALLOC;
+		split_block(best_block, size);
+		return best_block;
+	}
+
+	struct block_meta *last_block = small_pool->prev;
+	if (last_block->status == STATUS_ALLOC) {
 		/* If the last block is occupied, extend
 		 * the brk to accomodate for the new block. */
 
-		void *brk_end = get_payload(iter) + iter->size;
+		void *brk_end = get_payload(last_block) + last_block->size;
 
 		struct block_meta *new_block = ALIGN(brk_end);
 		void *new_payload = get_payload(new_block);
@@ -107,8 +129,8 @@ struct block_meta *new_small_block(size_t size)
 		new_block->size = ALIGN(size);
 		new_block->status = STATUS_ALLOC;
 
-		new_block->prev = iter;
-		new_block->next = iter->next;
+		new_block->prev = last_block;
+		new_block->next = last_block->next;
 		new_block->prev->next = new_block;
 		new_block->next->prev = new_block;
 
@@ -117,10 +139,11 @@ struct block_meta *new_small_block(size_t size)
 
 	/* If the last block is free, extend the
 	 * brk to include the size needed. */
-	size_t needed_space = size - iter->size;
+	size_t needed_space = ALIGN(size - last_block->size);
 	DIE(sbrk(needed_space) == (void *)-1, "fail brk() extension");
-	iter->size = size;
-	return iter;
+	last_block->size = ALIGN(size);
+	last_block->status = STATUS_ALLOC;
+	return last_block;
 }
 
 struct block_meta *new_large_block(size_t size)
@@ -188,15 +211,6 @@ void free_small(void *ptr)
 	do {
 		if (get_payload(block) == ptr) {
 			block->status = STATUS_FREE;
-			while (block->next->status == STATUS_FREE && block->next != block) {
-				merge_blocks(block, block->next);
-			}
-
-			while (block->prev->status == STATUS_FREE && block->prev != block) {
-				merge_blocks(block->prev, block);
-				block = block->prev;
-			}
-
 			return;
 		}
 
