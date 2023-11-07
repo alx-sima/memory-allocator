@@ -155,7 +155,7 @@ struct block_meta *new_large_block(size_t size)
 	DIE(ptr == MAP_FAILED, "fail mmap()");
 
 	struct block_meta *block = ALIGN(ptr);
-	block->status = STATUS_ALLOC;
+	block->status = STATUS_MAPPED;
 	block->size = actual_size;
 
 	if (large_pool) {
@@ -272,35 +272,113 @@ void *os_calloc(size_t nmemb, size_t size)
 	return ptr;
 }
 
-void *os_realloc(void *ptr, size_t size)
+void *realloc_small(void *ptr, size_t size)
 {
-	if (!ptr) {
-		return malloc(size);
-	}
-
-	if (!size) {
-		free(ptr);
+	if (!small_pool) {
 		return NULL;
 	}
 
-	struct block_meta *block = small_pool;
+	struct block_meta *iter = small_pool;
 	do {
-		/* TODO: Implement os_realloc */
-		block = block->next;
-	} while (block != small_pool);
+		void *payload;
+		if ((payload = get_payload(iter)) == ptr) {
+			if (iter->status == STATUS_FREE) {
+				return NULL;
+			}
 
-	block = large_pool;
-	do {
-		if (get_payload(block) == ptr) {
-			struct block_meta *new_block = new_large_block(size);
+			if (iter->size >= size) {
+				/* Shrink the block. */
+				split_block(iter, size);
+				return ptr;
+			}
+
+			if (size > MMAP_TRESHOLD) {
+				/* If the new size is larger than the treshold, allocate a
+				 * new large block and copy the data. */
+				struct block_meta *new_block = new_large_block(size);
+				void *new_payload = get_payload(new_block);
+
+				memcpy(new_payload, ptr, iter->size);
+				free_small(ptr);
+				return new_payload;
+			}
+
+			if (iter->next == small_pool) {
+				/* If this is the last block, extend the brk. */
+				size_t needed_space = ALIGN(size - iter->size);
+				DIE(sbrk(needed_space) == (void *)-1, "fail brk() extension");
+				iter->size = ALIGN(size);
+				return ptr;
+			}
+
+			/* Try to merge current block with the blocks to the right (the
+			 * left ones are already traversed so they can't be merged). */
+			while (iter->next != small_pool) {
+				if (iter->next->status == STATUS_ALLOC) {
+					break;
+				}
+
+				merge_blocks(iter, iter->next);
+			}
+
+			/* If the merged block is large enough, split it. */
+			if (iter->size >= size) {
+				split_block(iter, size);
+				return ptr;
+			}
+
+			/* If the merged block is still not large enough, allocate a new
+			 * block and copy the data. */
+			struct block_meta *new_block = new_small_block(size);
 			void *new_payload = get_payload(new_block);
-
-			memcpy(new_payload, ptr, block->size);
-			delete_large_block(block);
+			memcpy(new_payload, ptr, iter->size);
+			free_small(ptr);
 			return new_payload;
 		}
 
-		block = block->next;
-	} while (block != large_pool);
+		iter = iter->next;
+	} while (iter != small_pool);
+
 	return NULL;
+}
+
+void *realloc_large(void *ptr, size_t size)
+{
+	if (!large_pool) {
+		return NULL;
+	}
+
+	struct block_meta *iter = large_pool;
+	do {
+		if (get_payload(iter) == ptr) {
+			struct block_meta *new_ptr = os_malloc(size);
+			size_t min = iter->size < size ? iter->size : size;
+
+			memcpy(new_ptr, ptr, min);
+			delete_large_block(iter);
+			return new_ptr;
+		}
+
+		iter = iter->next;
+	} while (iter != large_pool);
+
+	return NULL;
+}
+
+void *os_realloc(void *ptr, size_t size)
+{
+	if (!ptr) {
+		return os_malloc(size);
+	}
+
+	if (!size) {
+		os_free(ptr);
+		return NULL;
+	}
+
+	void *retaddr = realloc_small(ptr, size);
+	if (retaddr) {
+		return retaddr;
+	}
+	return realloc_large(ptr, size);
 }
