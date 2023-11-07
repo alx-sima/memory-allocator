@@ -38,13 +38,14 @@ void split_block(struct block_meta *block, size_t size)
 	void *space_to_split = get_payload(block);
 	struct block_meta *new_block = ALIGN(space_to_split + size);
 	void *new_payload = get_payload(new_block);
-	if (space_to_split + block->size - new_payload <= 0) {
+
+	if (space_to_split + block->size <= new_payload) {
 		/* No place for new block. */
 		return;
 	}
 
 	new_block->status = STATUS_MAPPED;
-	new_block->size = size;
+	new_block->size = (void *)space_to_split + block->size - new_payload;
 
 	new_block->next = block->next;
 	new_block->prev = block;
