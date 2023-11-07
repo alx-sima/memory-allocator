@@ -249,8 +249,23 @@ void os_free(void *ptr)
 void *os_calloc(size_t nmemb, size_t size)
 {
 	size_t bytes_count = nmemb * size;
-	void *ptr = os_malloc(bytes_count);
+	if (!bytes_count) {
+		return NULL;
+	}
+
+	const size_t treshold = getpagesize();
+	const size_t required_size =
+		ALIGN(bytes_count + ALIGN(sizeof(struct block_meta)));
+	void *ptr;
+
+	if (required_size < treshold) {
+		ptr = new_small_block(bytes_count);
+	} else {
+		ptr = new_large_block(bytes_count);
+	}
+
 	if (ptr) {
+		ptr = get_payload(ptr);
 		memset(ptr, 0, bytes_count);
 	}
 
